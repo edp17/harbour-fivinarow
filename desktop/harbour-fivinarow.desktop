@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Five in a Row
+Comment=Gomoku (Five in a Row)
+Exec=/usr/bin/harbour-fivinarow
+Icon=harbour-fivinarow
+Type=Application
+Categories=Game;
+X-Sailfish-ApplicationType=Silica
+
+[X-Sailjail]
+Sandboxing=Disabled
