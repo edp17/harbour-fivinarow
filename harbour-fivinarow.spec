@@ -1,6 +1,6 @@
 Name: harbour-fivinarow
-Version: 1.0.0
-Release: 1
+Version: 1.1.0
+Release: 0
 Summary: Five in a Row (Gomoku)
 License: MIT
 URL: https://example.com/harbour-fivinarow

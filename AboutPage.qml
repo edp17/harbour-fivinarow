@@ -59,7 +59,7 @@ Page {
             // Version — optional manual entry
             Label {
                 anchors.horizontalCenter: parent.horizontalCenter
-                text: qsTr("Version 1.0")
+                text: qsTr("Version 1.1")
                 font.pixelSize: Theme.fontSizeMedium
                 color: "white"
             }

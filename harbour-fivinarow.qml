@@ -23,6 +23,7 @@ import Nemo.Configuration 1.0
 ApplicationWindow {
     id: app
     
+     SettingsStore { id: settings }
     property var appSettingsCopy: settings
     
     // Expose board and size to CoverPage
@@ -30,28 +31,7 @@ ApplicationWindow {
     property int liveBoardSize: 0
     property bool liveGameOver: false
     property string liveWinnerText: ""
-
-    ConfigurationGroup {
-        id: settings
-
-        // location in ~/.config/<org>/<app>.ini
-        path: "/apps/harbour-fivinarow/settings"
-
-        property string gameMode: "Player vs AI"
-        property string aiDifficulty: "Medium"
-        property string playerSymbol: "X"
-        property string aiSymbol: "O"
-        property string startingPlayer: "X"
-        property string player1Name: "Player 1"
-        property string player2Name: "Player 2"
-        property string settingsVersion: "1.0"
-        
-        property bool gameModeExpanded: true
-        property bool difficultyExpanded: true
-        property bool symbolExpanded: false
-        property bool startExpanded: false
-        property bool namesExpanded: false
-    }
+    property var liveWinningCells: []
 
     // Settings page component – pass the SAME settings object into it
     Component {
@@ -70,21 +50,13 @@ ApplicationWindow {
             id: gameView
             settings: appSettingsCopy 
 
-        // whenever the board changes, update the cover snapshot
-        onBoardChanged: {
-            // shallow copy to decouple (optional but safer)
-            app.liveBoard = board
-            app.liveBoardSize = boardSize
-            app.liveGameOver = gameOver
-            app.liveWinnerText = winnerText
-        }
-
-        Component.onCompleted: {
-            app.liveBoard = board
-            app.liveBoardSize = boardSize
-            app.liveGameOver = gameOver
-            app.liveWinnerText = winnerText
-        }
+            onCoverSnapshot: {
+                app.liveBoard = boardMatrix
+                app.liveBoardSize = boardSize
+                app.liveGameOver = gameOver
+                app.liveWinnerText = winnerText
+                app.liveWinningCells = winningCells
+            }
         }
     }
 
@@ -95,6 +67,7 @@ ApplicationWindow {
             boardSize: liveBoardSize
             gameOver: liveGameOver
             winnerText: liveWinnerText
+            winningCells: liveWinningCells
         }
     }
 }

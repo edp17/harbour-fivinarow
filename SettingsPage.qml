@@ -25,6 +25,24 @@ Page {
 
     allowedOrientations: Orientation.All
 
+    Connections {
+        target: settings
+        onGameModeChanged: {
+            if (settings.gameMode === "Player vs AI") {
+                deferExpandDifficulty.restart()
+            } else {
+                settings.difficultyExpanded = false
+            }
+        }
+    }
+
+    Timer {
+        id: deferExpandDifficulty
+        interval: 0
+        repeat: false
+        onTriggered: settings.difficultyExpanded = true
+    }
+
     // -------------------------------
     // REUSABLE EXPAND/COLLAPSE HEADER
     // -------------------------------
@@ -33,6 +51,7 @@ Page {
 
         BackgroundItem {
             id: header
+            property bool externalExpanded: false
             property alias text: headerLabel.text
             property bool expanded: false
             signal toggled(bool state)
@@ -41,8 +60,13 @@ Page {
             height: Theme.itemSizeSmall
 
             onClicked: {
-                expanded = !expanded
-                toggled(expanded)
+                if (!enabled) return
+                var next = !expanded
+                if (!externalExpanded) {
+                    // normal sections (local control)
+                    expanded = next
+                }
+                toggled(next)
             }
 
             Label {
@@ -182,9 +206,13 @@ Page {
 
                 onLoaded: {
                     item.text = qsTr("AI Difficulty")
-                    item.expanded = settings.difficultyExpanded
-                    item.enabled = settings.gameMode === "Player vs AI"
-                    item.opacity = item.enabled ? 1.0 : 0.4
+
+                    item.externalExpanded = true
+                    item.expanded = Qt.binding(function() { return settings.difficultyExpanded })
+
+                    item.enabled = Qt.binding(function() { return settings.gameMode === "Player vs AI" })
+                    item.opacity = Qt.binding(function() { return item.enabled ? 1.0 : 0.4 })
+
                     item.toggled.connect(function(state) {
                         if (item.enabled) settings.difficultyExpanded = state
                     })
@@ -230,6 +258,7 @@ Page {
                                 settings.aiDifficulty = "Easy"
                                 diffMed.checked = false
                                 diffHard.checked = false
+                                diffUnbeatable.checked = false
                             }
                         }
                     }
@@ -257,6 +286,7 @@ Page {
                                 settings.aiDifficulty = "Medium"
                                 diffEasy.checked = false
                                 diffHard.checked = false
+                                diffUnbeatable.checked = false
                             }
                         }
                     }
@@ -284,6 +314,35 @@ Page {
                                 settings.aiDifficulty = "Hard"
                                 diffEasy.checked = false
                                 diffMed.checked = false
+                                diffUnbeatable.checked = false
+                            }
+                        }
+                    }
+
+                    // Unbeatable
+                    Item {
+                        width: parent.width
+                        height: Theme.itemSizeSmall
+
+                        Label {
+                            text: qsTr("Unbeatable")
+                            anchors.leftMargin: Theme.paddingMedium
+                            anchors.left: parent.left
+                            anchors.verticalCenter: parent.verticalCenter
+                            font.pixelSize: Theme.fontSizeSmall
+                        }
+
+                        Switch {
+                            id: diffUnbeatable
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.rightMargin: Theme.paddingMedium
+                            checked: settings.aiDifficulty === "Unbeatable"
+                            onClicked: {
+                                settings.aiDifficulty = "Unbeatable"
+                                diffEasy.checked = false
+                                diffMed.checked = false
+                                diffHard.checked = false
                             }
                         }
                     }

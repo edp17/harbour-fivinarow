@@ -19,20 +19,17 @@
 import QtQuick 2.0
 import Sailfish.Silica 1.0
 
-Item {
+CoverBackground {
     id: cover
-    width: parent.width
-    height: parent.height
 
     property var boardMatrix: ([])
-    onBoardMatrixChanged: boardGrid.forceLayout()
     property int boardSize: 15
     property var winningCells: []
     property bool gameOver: false
     property string winnerText: ""
 
     /* ---------------------------
-       Background
+       Background (OLD STYLE)
        --------------------------- */
     Rectangle {
         anchors.fill: parent
@@ -41,7 +38,7 @@ Item {
     }
 
     /* ---------------------------
-       App title (TOP)
+       App title (TOP) (OLD STYLE)
        --------------------------- */
     Label {
         id: titleLabel
@@ -57,7 +54,7 @@ Item {
     }
 
     /* ---------------------------
-       Board area (CENTER)
+       Board area (CENTER) (OLD STYLE)
        --------------------------- */
     Item {
         id: boardArea
@@ -83,11 +80,12 @@ Item {
 
                     property int r: Math.floor(index / boardSize)
                     property int c: index % boardSize
-                    property string cell: boardMatrix[r] ? boardMatrix[r][c] : ""
+
+                    // Normalize null/undefined -> "" to avoid "Unable to assign null to QString"
+                    property var raw: (boardMatrix && boardMatrix[r]) ? boardMatrix[r][c] : ""
+                    property string cell: (raw === null || raw === undefined) ? "" : ("" + raw)
 
                     color: {
-                        var r = Math.floor(index / boardSize)
-                        var c = index % boardSize
                         // highlight winning line
                         for (var i = 0; i < winningCells.length; i++) {
                             if (winningCells[i].r === r && winningCells[i].c === c)
@@ -117,15 +115,12 @@ Item {
     }
 
     /* ---------------------------
-       Game Over overlay
+       Game Over overlay (OLD STYLE)
        --------------------------- */
     Rectangle {
-        id: gameOverText
+        id: gameOverOverlay
         anchors.fill: boardArea
-        anchors.top: boardArea.top
-        width: boardArea.width
-        height: boardArea.height
-        color: "white" //"#202020"
+        color: "white"
         opacity: 0.60
         visible: gameOver
         z: 20
