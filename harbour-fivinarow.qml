@@ -30,6 +30,7 @@ ApplicationWindow {
     property var liveBoard: []
     property int liveBoardSize: 0
     property bool liveGameOver: false
+    property bool liveGameDraw: false
     property string liveWinnerText: ""
     property var liveWinningCells: []
 
@@ -54,6 +55,7 @@ ApplicationWindow {
                 app.liveBoard = boardMatrix
                 app.liveBoardSize = boardSize
                 app.liveGameOver = gameOver
+                app.liveGameDraw = gameDraw
                 app.liveWinnerText = winnerText
                 app.liveWinningCells = winningCells
             }
@@ -66,6 +68,7 @@ ApplicationWindow {
             boardMatrix: liveBoard
             boardSize: liveBoardSize
             gameOver: liveGameOver
+            gameDraw: liveGameDraw
             winnerText: liveWinnerText
             winningCells: liveWinningCells
         }

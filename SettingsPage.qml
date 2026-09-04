@@ -97,6 +97,21 @@ Page {
         anchors.fill: parent
         contentHeight: content.height
 
+        PullDownMenu {
+            MenuItem {
+                text: qsTr("Statistics")
+                onClicked: pageStack.push(Qt.resolvedUrl("StatisticsPage.qml"), {
+                    settings: settingsPage.settings
+                })
+            }
+            MenuItem {
+                text: qsTr("Best Times")
+                onClicked: pageStack.push(Qt.resolvedUrl("BestTimesPage.qml"), {
+                    settings: settingsPage.settings
+                })
+            }
+        }
+
         Column {
             id: content
             width: parent.width
@@ -146,7 +161,7 @@ Page {
                         height: Theme.itemSizeSmall
 
                         Label {
-                            text: qsTr("Player1 vs Player2")
+                            text: qsTr("Player 1 vs Player 2")
                             anchors.left: parent.left
                             anchors.leftMargin: Theme.paddingMedium
                             anchors.verticalCenter: parent.verticalCenter
@@ -258,7 +273,7 @@ Page {
                                 settings.aiDifficulty = "Easy"
                                 diffMed.checked = false
                                 diffHard.checked = false
-                                diffUnbeatable.checked = false
+                                diffExpert.checked = false
                             }
                         }
                     }
@@ -286,7 +301,7 @@ Page {
                                 settings.aiDifficulty = "Medium"
                                 diffEasy.checked = false
                                 diffHard.checked = false
-                                diffUnbeatable.checked = false
+                                diffExpert.checked = false
                             }
                         }
                     }
@@ -314,18 +329,18 @@ Page {
                                 settings.aiDifficulty = "Hard"
                                 diffEasy.checked = false
                                 diffMed.checked = false
-                                diffUnbeatable.checked = false
+                                diffExpert.checked = false
                             }
                         }
                     }
 
-                    // Unbeatable
+                    // Expert
                     Item {
                         width: parent.width
                         height: Theme.itemSizeSmall
 
                         Label {
-                            text: qsTr("Unbeatable")
+                            text: qsTr("Expert")
                             anchors.leftMargin: Theme.paddingMedium
                             anchors.left: parent.left
                             anchors.verticalCenter: parent.verticalCenter
@@ -333,13 +348,14 @@ Page {
                         }
 
                         Switch {
-                            id: diffUnbeatable
+                            id: diffExpert
                             anchors.right: parent.right
                             anchors.verticalCenter: parent.verticalCenter
                             anchors.rightMargin: Theme.paddingMedium
-                            checked: settings.aiDifficulty === "Unbeatable"
+                            checked: settings.aiDifficulty === "Expert" ||
+                                     settings.aiDifficulty === "Unbeatable"
                             onClicked: {
-                                settings.aiDifficulty = "Unbeatable"
+                                settings.aiDifficulty = "Expert"
                                 diffEasy.checked = false
                                 diffMed.checked = false
                                 diffHard.checked = false
@@ -586,6 +602,144 @@ Page {
                 }
             }
 
+            // -------------------------------
+            // 6. BOARD AND RULES
+            // -------------------------------
+
+            Loader {
+                width: parent.width
+                sourceComponent: expandingHeader
+                onLoaded: {
+                    item.text = qsTr("Board & Rules")
+                    item.expanded = settings.boardExpanded
+                    item.toggled.connect(function(state) {
+                        settings.boardExpanded = state
+                    })
+                }
+            }
+
+            Item {
+                width: parent.width
+                clip: true
+                height: settings.boardExpanded ? boardContent.implicitHeight : 0
+                Behavior on height { NumberAnimation { duration: 200 } }
+
+                Column {
+                    id: boardContent
+                    width: parent.width
+
+                    ComboBox {
+                        width: parent.width
+                        label: qsTr("Board size")
+                        currentIndex: settings.boardSize === 9 ? 0
+                                      : settings.boardSize === 13 ? 1 : 2
+                        menu: ContextMenu {
+                            MenuItem {
+                                text: qsTr("9 × 9")
+                                onClicked: settings.boardSize = 9
+                            }
+                            MenuItem {
+                                text: qsTr("13 × 13")
+                                onClicked: settings.boardSize = 13
+                            }
+                            MenuItem {
+                                text: qsTr("15 × 15")
+                                onClicked: settings.boardSize = 15
+                            }
+                        }
+                    }
+
+                    ComboBox {
+                        width: parent.width
+                        label: qsTr("Winning rule")
+                        currentIndex: settings.winRule === "ExactFive" ? 1 : 0
+                        menu: ContextMenu {
+                            MenuItem {
+                                text: qsTr("Five or more")
+                                onClicked: settings.winRule = "Freestyle"
+                            }
+                            MenuItem {
+                                text: qsTr("Exactly five")
+                                onClicked: settings.winRule = "ExactFive"
+                            }
+                        }
+                    }
+
+                    Label {
+                        x: Theme.horizontalPageMargin
+                        width: parent.width - 2 * Theme.horizontalPageMargin
+                        wrapMode: Text.WordWrap
+                        color: Theme.secondaryColor
+                        font.pixelSize: Theme.fontSizeExtraSmall
+                        text: qsTr("Board and rule changes apply to the next new game.")
+                    }
+                }
+            }
+
+            // -------------------------------
+            // 7. ACCESSIBILITY AND FEEDBACK
+            // -------------------------------
+
+            Loader {
+                width: parent.width
+                sourceComponent: expandingHeader
+                onLoaded: {
+                    item.text = qsTr("Accessibility & Feedback")
+                    item.expanded = settings.accessibilityExpanded
+                    item.toggled.connect(function(state) {
+                        settings.accessibilityExpanded = state
+                    })
+                }
+            }
+
+            Item {
+                width: parent.width
+                clip: true
+                height: settings.accessibilityExpanded
+                        ? accessibilityContent.implicitHeight : 0
+                Behavior on height { NumberAnimation { duration: 200 } }
+
+                Column {
+                    id: accessibilityContent
+                    width: parent.width
+
+                    TextSwitch {
+                        text: qsTr("Show board coordinates")
+                        description: qsTr("Display letters and numbers along the board.")
+                        checked: settings.showCoordinates
+                        onClicked: settings.showCoordinates = checked
+                    }
+
+                    ComboBox {
+                        width: parent.width
+                        label: qsTr("Board zoom")
+                        currentIndex: settings.boardZoomPercent === 150 ? 2
+                                      : settings.boardZoomPercent === 125 ? 1 : 0
+                        menu: ContextMenu {
+                            MenuItem {
+                                text: "100%"
+                                onClicked: settings.boardZoomPercent = 100
+                            }
+                            MenuItem {
+                                text: "125%"
+                                onClicked: settings.boardZoomPercent = 125
+                            }
+                            MenuItem {
+                                text: "150%"
+                                onClicked: settings.boardZoomPercent = 150
+                            }
+                        }
+                    }
+
+                    TextSwitch {
+                        text: qsTr("Haptic feedback")
+                        description: qsTr("Vibrate briefly when placing a symbol.")
+                        checked: settings.hapticFeedback
+                        onClicked: settings.hapticFeedback = checked
+                    }
+                }
+            }
+
 
             // -------------------------------
             // RESET BUTTON
@@ -601,14 +755,21 @@ Page {
                     settings.playerSymbol = "X"
                     settings.aiSymbol = "O"
                     settings.startingPlayer = "X"
-                    settings.player1Name = "Player 1"
-                    settings.player2Name = "Player 2"
+                    settings.player1Name = qsTr("Player 1")
+                    settings.player2Name = qsTr("Player 2")
+                    settings.boardSize = 15
+                    settings.winRule = "Freestyle"
+                    settings.showCoordinates = false
+                    settings.boardZoomPercent = 100
+                    settings.hapticFeedback = true
 
                     settings.gameModeExpanded = true
                     settings.difficultyExpanded = true
                     settings.symbolExpanded = false
                     settings.startExpanded = false
                     settings.namesExpanded = false
+                    settings.boardExpanded = false
+                    settings.accessibilityExpanded = false
                 }
             }
 

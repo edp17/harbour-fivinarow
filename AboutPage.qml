@@ -27,6 +27,13 @@ Page {
         anchors.fill: parent
         contentHeight: contentColumn.height
 
+        PullDownMenu {
+            MenuItem {
+                text: qsTr("How to Play")
+                onClicked: pageStack.push(Qt.resolvedUrl("HowToPlayPage.qml"))
+            }
+        }
+
         Column {
             id: contentColumn
             width: parent.width
@@ -59,7 +66,7 @@ Page {
             // Version — optional manual entry
             Label {
                 anchors.horizontalCenter: parent.horizontalCenter
-                text: qsTr("Version 1.1")
+                text: qsTr("Version 1.2")
                 font.pixelSize: Theme.fontSizeMedium
                 color: "white"
             }

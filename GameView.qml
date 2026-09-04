@@ -18,26 +18,33 @@
 */
 import QtQuick 2.0
 import QtQuick.Layouts 1.0
+import QtFeedback 5.0
 import Sailfish.Silica 1.0
+import harbour.fivinarow 1.0
 
 Page {
     id: page
 
     // Settings object passed from ApplicationWindow
     property var settings
-    signal coverSnapshot(var boardMatrix, int boardSize, bool gameOver, string winnerText, var winningCells)
+    signal coverSnapshot(var boardMatrix, int boardSize, bool gameOver, bool gameDraw,
+                         string winnerText, var winningCells)
 
     // Dynamic automatic board scaling
     property real availableWidth: width
     property real availableHeight: height - pageHeader.height
 
-    property real dynamicCellSize: Math.floor(
+    property real fitCellSize: Math.floor(
         Math.min(
             availableWidth / boardSize,
             availableHeight / boardSize,
             72       // Maximum size on big phones/tablets
         )
     )
+    property real dynamicCellSize: Math.max(20, Math.floor(
+        fitCellSize * (settings ? settings.boardZoomPercent : 100) / 100))
+    property real coordinateMargin: settings && settings.showCoordinates
+                                    ? Theme.itemSizeExtraSmall : 0
 
     property int lastMoveR: -1
     property int lastMoveC: -1
@@ -46,6 +53,7 @@ Page {
     property var pendingAiMove: null
     property bool aiThinking: false
     property var hardRoot: []
+    property var hardEvaluated: []
     property int hardIndex: 0
     property var hardBestMove: null
     property real hardBestVal: -1e18
@@ -59,12 +67,116 @@ Page {
     // aiRandomness: 3  - more
     // aiRandomness: 5+ - starts to get sloppy
     property int aiRandomness: 2
-    // Unbeatable
+    // Expert fallback search (the compiled engine is the normal path)
     property int unbeatableDepth: 8          // 6 plies forcing search (try 8 if still fast)
     property int unbeatableNodeBudget: 4000  // per root eval, keeps it responsive
     property int unbeatableK: 14             // evaluate more root moves than Hard
 
-    function randInt(n) { return Math.floor(Math.random() * n) }
+    property double aiRandomState: 1
+    property int gameSequence: 0
+    property int aiRequestSerial: 0
+    property int activeAiRequest: 0
+    property int lastAiDepth: 0
+    property double lastAiNodes: 0
+    property bool initializationComplete: false
+
+    Connections {
+        target: settings
+        onBoardSizeChanged: {
+            if (initializationComplete && moveCount() === 0) restartGame()
+        }
+        onWinRuleChanged: {
+            if (initializationComplete && moveCount() === 0) restartGame()
+        }
+    }
+
+    GomokuAI {
+        id: nativeAI
+
+        onMoveReady: {
+            if (requestId !== activeAiRequest) return
+            if (gameOver || !settings || settings.gameMode !== "Player vs AI" ||
+                    currentPlayer !== settings.aiSymbol) {
+                aiThinking = false
+                return
+            }
+
+            lastAiDepth = completedDepth
+            lastAiNodes = nodes
+            var move = { r: row, c: column }
+            if (!isValidMoveObj(move) || !inBounds(move.r, move.c) ||
+                    board[move.r][move.c] !== null) {
+                console.warn("[AI] Native engine returned invalid move:", row, column)
+                move = selectAIMove()
+            }
+
+            if (isValidMoveObj(move)) commitHardMove(move)
+            else aiThinking = false
+        }
+    }
+
+    function reseedAI() {
+        gameSequence++
+        var timePart = Date.now() & 0x7fffffff
+        var enginePart = Math.floor(Math.random() * 0x7fffffff)
+        aiRandomState = (timePart ^ enginePart ^ (gameSequence * 2654435761)) >>> 0
+        if (aiRandomState === 0) aiRandomState = 0x6d2b79f5
+    }
+
+    function randomUnit() {
+        var x = Math.floor(aiRandomState) | 0
+        x ^= x << 13
+        x ^= x >>> 17
+        x ^= x << 5
+        aiRandomState = x >>> 0
+        return aiRandomState / 4294967296
+    }
+
+    function randInt(n) {
+        return n > 0 ? Math.floor(randomUnit() * n) : 0
+    }
+
+    ThemeEffect {
+        id: placementHaptic
+        effect: ThemeEffect.Press
+    }
+
+    function playHapticFeedback() {
+        if (!settings || !settings.hapticFeedback) return
+        try {
+            if (placementHaptic.supported)
+                placementHaptic.play()
+        } catch (error) {
+            console.warn("Could not play haptic feedback:", error)
+        }
+    }
+
+    function chooseVariedMove(scored, maxChoices, relativeTolerance, minimumTolerance) {
+        if (!scored || scored.length === 0) return null
+
+        var ordered = scored.slice(0)
+        ordered.sort(function(a, b) { return b.s - a.s })
+
+        var best = ordered[0].s
+        var tolerance = Math.max(minimumTolerance || 0,
+                                 Math.abs(best) * (relativeTolerance || 0))
+        var band = []
+        var count = Math.min(maxChoices || 1, ordered.length)
+        for (var i = 0; i < count; i++) {
+            if (best - ordered[i].s <= tolerance) band.push(ordered[i].m)
+        }
+        if (band.length === 0) band.push(ordered[0].m)
+
+        // Favour the stronger end of the band without replaying one fixed line.
+        var totalWeight = 0
+        for (var w = 0; w < band.length; w++) totalWeight += band.length - w
+        var pick = randomUnit() * totalWeight
+        for (var j = 0; j < band.length; j++) {
+            pick -= band.length - j
+            if (pick <= 0) return band[j]
+        }
+        return band[0]
+    }
 
     property bool gameTimerRunning: false
     property double gameStartMs: 0
@@ -88,6 +200,13 @@ Page {
         onTriggered: {
             elapsedMs = Math.max(0, Date.now() - gameStartMs)
         }
+    }
+
+    Timer {
+        interval: 5000
+        repeat: true
+        running: !gameOver && moveCount() > 0
+        onTriggered: saveGameState()
     }
 
     Timer {
@@ -148,7 +267,8 @@ Page {
         return out
     }
 
-    function profitBestMove(aiSym, oppSym, profitSelf, profitOpp) {
+    function profitBestMove(aiSym, oppSym, profitSelf, profitOpp,
+                            maxChoices, relativeTolerance, minimumTolerance) {
         var n = boardSize
         // matrix[y][x]
         var pm = []
@@ -204,23 +324,21 @@ Page {
             }
         }
 
-        // pick best empty (random among ties)
-        var best = -1
-        var bestMoves = []
+        // Select from a narrow score band. This keeps tactical priorities while
+        // avoiding the same positional reply in every repeated game.
+        var scoredMoves = []
         for (var rr = 0; rr < n; rr++) {
             for (var cc = 0; cc < n; cc++) {
                 if (board[rr][cc] !== null) continue
-                var s = pm[rr][cc]
-                if (s > best) {
-                    best = s
-                    bestMoves = [{ r: rr, c: cc }]
-                } else if (s === best) {
-                    bestMoves.push({ r: rr, c: cc })
-                }
+                var centerDistance = Math.abs(rr - (n - 1) / 2) +
+                                     Math.abs(cc - (n - 1) / 2)
+                var centerBias = Math.max(0, n - centerDistance) * 0.25
+                scoredMoves.push({ m: { r: rr, c: cc }, s: pm[rr][cc] + centerBias })
             }
         }
-        if (bestMoves.length === 0) return firstEmptyFallback()
-        return bestMoves[Math.floor(Math.random() * bestMoves.length)]
+        if (scoredMoves.length === 0) return firstEmptyFallback()
+        return chooseVariedMove(scoredMoves, maxChoices || 1,
+                                relativeTolerance || 0, minimumTolerance || 0)
     }
 
     function profitMatrixScores(aiSym, oppSym, profitSelf, profitOpp) {
@@ -293,8 +411,23 @@ Page {
         return mm + ":" + ss
     }
 
+    function gameModeLabel(mode) {
+        if (mode === "Player vs AI") return qsTr("Player vs AI")
+        if (mode === "Player1 vs Player2") return qsTr("Player 1 vs Player 2")
+        return mode || ""
+    }
+
+    function difficultyLabel(difficulty) {
+        if (difficulty === "Easy") return qsTr("Easy")
+        if (difficulty === "Medium") return qsTr("Medium")
+        if (difficulty === "Hard") return qsTr("Hard")
+        if (difficulty === "Expert" || difficulty === "Unbeatable") return qsTr("Expert")
+        return difficulty || ""
+    }
+
     function bestTimesKeyForDifficulty() {
         var d = settings ? settings.aiDifficulty : "Easy"
+        if (d === "Expert" || d === "Unbeatable") return "bestTimesUnbeatableJson"
         if (d === "Hard") return "bestTimesHardJson"
         if (d === "Medium") return "bestTimesMediumJson"
         return "bestTimesEasyJson"
@@ -314,6 +447,7 @@ Page {
         if (key === "bestTimesEasyJson") settings.bestTimesEasyJson = json
         else if (key === "bestTimesMediumJson") settings.bestTimesMediumJson = json
         else if (key === "bestTimesHardJson") settings.bestTimesHardJson = json
+        else if (key === "bestTimesUnbeatableJson") settings.bestTimesUnbeatableJson = json
     }
 
     function recordBestTime(ms) {
@@ -325,16 +459,29 @@ Page {
         arr.push({
             name: settings.player1Name,
             ms: ms,
-            at: Date.now()
+            at: Date.now(),
+            boardSize: boardSize,
+            winRule: activeWinRule
         })
 
         // sort ascending by time
         arr.sort(function(a,b){ return a.ms - b.ms })
 
-        // keep top 6
-        if (arr.length > 6) arr.length = 6
+        // Keep six results for every board/rule combination. Old records did
+        // not have metadata and are treated as 15x15 freestyle results.
+        var kept = [], counts = ({})
+        for (var i = 0; i < arr.length; i++) {
+            var size = arr[i].boardSize || 15
+            var rule = arr[i].winRule || "Freestyle"
+            var configKey = size + "|" + rule
+            counts[configKey] = counts[configKey] || 0
+            if (counts[configKey] < 6) {
+                kept.push(arr[i])
+                counts[configKey]++
+            }
+        }
 
-        saveBestTimesArray(key, arr)
+        saveBestTimesArray(key, kept)
     }
 
     function commitHardMove(m) {
@@ -360,22 +507,20 @@ Page {
     allowedOrientations: Orientation.All
 
     property int boardSize: 15
-//    property int cellSize: 72
-    property var board: (function() {
-        var b = []
-        for (var i = 0; i < boardSize; i++) {
-            b[i] = []
-            for (var j = 0; j < boardSize; j++) b[i][j] = null
-        }
-        return b
-    })()
+    property var board: createEmptyBoard(boardSize)
+    property string activeWinRule: "Freestyle"
 
     property string currentPlayer: "X"
     property bool gameOver: false
+    property bool gameDraw: false
     property var winningCells: []
     property var undoStack: []
     property var redoStack: []
     property bool newGameStarted: false
+    readonly property bool aiBusy: aiThinking || aiTimer.running ||
+                                   hardThinkTimer.running || hardApplyDelayTimer.running
+
+    RemorsePopup { id: newGameRemorse }
 
     // -------------------------------
     // Utilities
@@ -536,18 +681,11 @@ Page {
             var m = cand[i]
             if (!m) continue
             var base = tacticalScoreMove(m.r, m.c, ai, pl)
-            var modifier = (Math.random() - 0.5) * aiRandomness   // aiRandomness ~ 1..3
+            var modifier = (randomUnit() - 0.5) * aiRandomness
             scored.push({ m: m, s: base + modifier })
         }
         scored.sort(function(a,b){ return b.s - a.s })
         scored.length = Math.min(hardK, scored.length)
-
-        // small shuffle among top 5 to reduce predictability without weakening much
-        var top = Math.min(5, scored.length)
-        for (var i = 0; i < top; i++) {
-            var j = i + Math.floor(Math.random() * (top - i))
-            var tmp = scored[i]; scored[i] = scored[j]; scored[j] = tmp
-        }
 
         if (scored.length === 0) {
             var fb2 = firstEmptyFallback()
@@ -557,22 +695,9 @@ Page {
         }
 
         hardRoot = scored          // store {m,s}
+        hardEvaluated = []
         hardIndex = 0
-        // Choose from near-best root moves to avoid deterministic openings
-        var top = Math.min(5, scored.length)        // consider top 5
-        var band = []
-
-        // Define “near-best” as within X% of best score
-        var bestS = scored[0].s
-        var eps = Math.max(5000, Math.abs(bestS) * 0.01)  // 1% or at least 5000
-
-        for (var i0 = 0; i0 < top; i0++) {
-            if (bestS - scored[i0].s <= eps)
-                band.push(scored[i0])
-        }
-
-        if (band.length === 0) band = scored.slice(0, top)
-        hardBestMove = band[randInt(band.length)].m
+        hardBestMove = scored[0].m
         hardBestVal = -1e18
 
         hardThinkTimer.start()
@@ -584,20 +709,19 @@ Page {
         if (!hardRoot || hardIndex >= hardRoot.length) {
             hardThinkTimer.stop()
 
+            if (hardEvaluated.length > 0) {
+                if (settings.aiDifficulty === "Unbeatable") {
+                    hardBestMove = chooseVariedMove(hardEvaluated, 3, 0.0001, 1500)
+                } else {
+                    hardBestMove = chooseVariedMove(hardEvaluated, 4, 0.015, 5000)
+                }
+            }
+
             if (!isValidMoveObj(hardBestMove))
                 hardBestMove = firstEmptyFallback()
 
-            // enforce minimum delay
-            var elapsed = Date.now() - hardThinkStartMs
-            var remaining = hardMinThinkMs - elapsed
-            if (remaining > 0) {
-                hardApplyDelayTimer.interval = remaining
-                hardApplyDelayTimer.start()
-                return
-            }
-
-            aiThinking = false
             if (hardBestMove) commitHardMove(hardBestMove)
+            else aiThinking = false
             return
         }
 
@@ -625,7 +749,7 @@ Page {
         }
         // tiny modifier to break near-ties
         if (Math.abs(val - hardBestVal) < 2000)
-            val += (Math.random() - 0.5) * aiRandomness
+            val += (randomUnit() - 0.5) * aiRandomness
 
         // If this root move is forcing, look one more ply deeper (AI -> Opp -> AI forcing response)
         // This is cheap because it only considers forcing AI replies.
@@ -670,6 +794,8 @@ Page {
         }
 
         board[m2.r][m2.c] = null
+
+        hardEvaluated = hardEvaluated.concat([{ m: m2, s: val }])
 
         if (val > hardBestVal) {
             hardBestVal = val
@@ -729,7 +855,7 @@ Page {
             var m = cand[i]
             if (!m) continue
             var base = pm[m.r][m.c]
-            var jitter = (Math.random() - 0.5) * aiRandomness
+            var jitter = (randomUnit() - 0.5) * aiRandomness
             scored.push({ m: m, s: base + jitter })
         }
 
@@ -744,6 +870,7 @@ Page {
         }
 
         hardRoot = scored
+        hardEvaluated = []
         hardIndex = 0
         hardBestMove = scored[0].m
         hardBestVal = -1e18
@@ -779,7 +906,14 @@ Page {
         // opening: play center
         if (!anyStone) {
             var mid = Math.floor(boardSize / 2)
-            return [{ r: mid, c: mid }]
+            var opening = []
+            for (var dr = -1; dr <= 1; dr++) {
+                for (var dc = -1; dc <= 1; dc++) {
+                    if (inBounds(mid + dr, mid + dc))
+                        opening.push({ r: mid + dr, c: mid + dc })
+                }
+            }
+            return opening
         }
 
         for (var r2 = 0; r2 < boardSize; r2++) {
@@ -813,7 +947,8 @@ Page {
     }
 
     function moveThreats(r, c, sym) {
-        if (board[r][c] !== null) return null
+        // Callers evaluate both empty candidates and a just-placed trial stone.
+        if (board[r][c] !== null && board[r][c] !== sym) return null
         var dirs = [[1,0],[0,1],[1,1],[1,-1]]
 
         var win = false
@@ -825,7 +960,8 @@ Page {
         for (var i = 0; i < dirs.length; i++) {
             var dx = dirs[i][0], dy = dirs[i][1]
             var li = lineInfo(r, c, sym, dx, dy)
-            if (li.len >= 5) win = true
+            if (typeof activeWinRule !== "undefined" && activeWinRule === "ExactFive"
+                    ? li.len === 5 : li.len >= 5) win = true
             else if (li.len === 4 && li.open === 2) openFour++
             else if (li.len === 4 && li.open === 1) closedFour++
             else if (li.len === 3 && li.open === 2) openThree++
@@ -884,6 +1020,36 @@ Page {
         return s
     }
 
+    function createEmptyBoard(size) {
+        var result = []
+        for (var r = 0; r < size; r++) {
+            result[r] = []
+            for (var c = 0; c < size; c++) result[r][c] = null
+        }
+        return result
+    }
+
+    function moveCount() {
+        var count = 0
+        for (var r = 0; r < boardSize; r++)
+            for (var c = 0; c < boardSize; c++)
+                if (board[r][c] !== null) count++
+        return count
+    }
+
+    function boardIsFull() {
+        return moveCount() === boardSize * boardSize
+    }
+
+    function normalizeBoardSize(value) {
+        value = Number(value)
+        return value === 9 || value === 13 || value === 15 ? value : 15
+    }
+
+    function normalizeWinRule(value) {
+        return value === "ExactFive" ? "ExactFive" : "Freestyle"
+    }
+
     function cloneBoard(src) {
         var out = []
         for (var r = 0; r < src.length; r++) {
@@ -894,12 +1060,159 @@ Page {
         return out
     }
 
+    function saveGameState() {
+        if (!settings) return
+        if (gameOver || moveCount() === 0) {
+            settings.savedGameJson = ""
+            return
+        }
+        settings.savedGameJson = JSON.stringify({
+            version: 1,
+            board: cloneBoard(board),
+            boardSize: boardSize,
+            currentPlayer: currentPlayer,
+            lastMoveR: lastMoveR,
+            lastMoveC: lastMoveC,
+            elapsedMs: elapsedMs,
+            timerStarted: timerStartedThisGame,
+            gameMode: settings.gameMode,
+            aiDifficulty: settings.aiDifficulty,
+            playerSymbol: settings.playerSymbol,
+            aiSymbol: settings.aiSymbol,
+            startingPlayer: settings.startingPlayer,
+            player1Name: settings.player1Name,
+            player2Name: settings.player2Name,
+            winRule: activeWinRule
+        })
+    }
+
+    function restoreSavedGame() {
+        if (!settings || !settings.savedGameJson) return false
+        try {
+            var state = JSON.parse(settings.savedGameJson)
+            var size = normalizeBoardSize(state.boardSize)
+            if (!state || state.version !== 1 || !Array.isArray(state.board) ||
+                    state.board.length !== size) throw "invalid board"
+            for (var r = 0; r < size; r++) {
+                if (!Array.isArray(state.board[r]) || state.board[r].length !== size)
+                    throw "invalid row"
+                for (var c = 0; c < size; c++) {
+                    var value = state.board[r][c]
+                    if (value !== null && value !== "X" && value !== "O")
+                        throw "invalid cell"
+                }
+            }
+            if (state.currentPlayer !== "X" && state.currentPlayer !== "O")
+                throw "invalid player"
+
+            settings.gameMode = state.gameMode === "Player1 vs Player2"
+                                ? "Player1 vs Player2" : "Player vs AI"
+            var savedDifficulty = state.aiDifficulty === "Unbeatable"
+                                ? "Expert" : state.aiDifficulty
+            settings.aiDifficulty = ["Easy", "Medium", "Hard", "Expert"]
+                                    .indexOf(savedDifficulty) >= 0
+                                  ? savedDifficulty : "Medium"
+            settings.playerSymbol = state.playerSymbol === "O" ? "O" : "X"
+            settings.aiSymbol = settings.playerSymbol === "X" ? "O" : "X"
+            settings.startingPlayer = state.startingPlayer === "O" ? "O" : "X"
+            settings.player1Name = state.player1Name || qsTr("Player 1")
+            settings.player2Name = state.player2Name || qsTr("Player 2")
+            settings.boardSize = size
+            settings.winRule = normalizeWinRule(state.winRule)
+
+            boardSize = size
+            activeWinRule = settings.winRule
+            board = cloneBoard(state.board)
+            currentPlayer = state.currentPlayer
+            lastMoveR = Number(state.lastMoveR)
+            lastMoveC = Number(state.lastMoveC)
+            if (isNaN(lastMoveR)) lastMoveR = -1
+            if (isNaN(lastMoveC)) lastMoveC = -1
+            elapsedMs = Math.max(0, Number(state.elapsedMs) || 0)
+            timerStartedThisGame = !!state.timerStarted
+            if (timerStartedThisGame && settings.gameMode === "Player vs AI") {
+                gameStartMs = Date.now() - elapsedMs
+                gameTimerRunning = true
+            }
+            gameOver = false
+            gameDraw = false
+            winningCells = []
+            undoStack = []
+            redoStack = []
+            return moveCount() > 0
+        } catch (e) {
+            console.warn("Could not restore saved game:", e)
+            settings.savedGameJson = ""
+            return false
+        }
+    }
+
+    function loadStatistics() {
+        var stats
+        try { stats = JSON.parse(settings ? settings.statisticsJson : "{}") }
+        catch (e) { stats = ({}) }
+        if (!stats || typeof stats !== "object") stats = ({})
+        stats.games = Number(stats.games) || 0
+        stats.wins = Number(stats.wins) || 0
+        stats.losses = Number(stats.losses) || 0
+        stats.draws = Number(stats.draws) || 0
+        stats.currentStreak = Number(stats.currentStreak) || 0
+        stats.bestStreak = Number(stats.bestStreak) || 0
+        stats.byDifficulty = stats.byDifficulty || ({})
+        return stats
+    }
+
+    function recordResult(result) {
+        if (!settings || settings.gameMode !== "Player vs AI") return
+        var stats = loadStatistics()
+        stats.games++
+        if (result === "win") {
+            stats.wins++
+            stats.currentStreak++
+            stats.bestStreak = Math.max(stats.bestStreak, stats.currentStreak)
+        } else if (result === "loss") {
+            stats.losses++
+            stats.currentStreak = 0
+        } else {
+            stats.draws++
+            stats.currentStreak = 0
+        }
+        var key = settings.aiDifficulty === "Unbeatable" ? "Expert" : settings.aiDifficulty
+        var bucket = stats.byDifficulty[key] || { games: 0, wins: 0, losses: 0, draws: 0 }
+        bucket.games = (Number(bucket.games) || 0) + 1
+        bucket.wins = (Number(bucket.wins) || 0) + (result === "win" ? 1 : 0)
+        bucket.losses = (Number(bucket.losses) || 0) + (result === "loss" ? 1 : 0)
+        bucket.draws = (Number(bucket.draws) || 0) + (result === "draw" ? 1 : 0)
+        stats.byDifficulty[key] = bucket
+        settings.statisticsJson = JSON.stringify(stats)
+    }
+
+    function requestNewGame() {
+        if (!gameOver && moveCount() > 0) {
+            newGameRemorse.execute(qsTr("Starting a new game"), function() {
+                restartGame()
+            })
+        } else {
+            restartGame()
+        }
+    }
+
     function restartGame() {
-        for (var i = 0; i < boardSize; i++)
-            for (var j = 0; j < boardSize; j++) board[i][j] = null
+        activeAiRequest = ++aiRequestSerial
+        hardThinkTimer.stop()
+        hardApplyDelayTimer.stop()
+        aiTimer.stop()
+        pendingAiMove = null
+        aiThinking = false
+        reseedAI()
+
+        boardSize = settings ? normalizeBoardSize(settings.boardSize) : 15
+        activeWinRule = settings ? normalizeWinRule(settings.winRule) : "Freestyle"
+        board = createEmptyBoard(boardSize)
 
         currentPlayer = settings ? settings.startingPlayer : "X"
         gameOver = false
+        gameDraw = false
         winningCells = []
         undoStack = []
         redoStack = []
@@ -909,6 +1222,7 @@ Page {
         timerStartedThisGame = false
         gameTimerRunning = false
         elapsedMs = 0
+        if (settings) settings.savedGameJson = ""
 
         // If AI should start, trigger move
         if (settings && settings.gameMode === "Player vs AI" &&
@@ -929,9 +1243,25 @@ Page {
             var humanSym = settings.playerSymbol
             if (player === humanSym) {
                 recordBestTime(elapsedMs)
+                recordResult("win")
+            } else {
+                recordResult("loss")
             }
         }
+        if (settings) settings.savedGameJson = ""
         lastMoveR = -1;
+        lastMoveC = -1
+        publishBoardToCover()
+    }
+
+    function declareDraw() {
+        gameDraw = true
+        gameOver = true
+        winningCells = []
+        stopGameTimer()
+        recordResult("draw")
+        if (settings) settings.savedGameJson = ""
+        lastMoveR = -1
         lastMoveC = -1
         publishBoardToCover()
     }
@@ -955,7 +1285,9 @@ Page {
         for (var i = 0; i < directions.length; i++) {
             var dx = directions[i][0], dy = directions[i][1]
             var len = count(dx, dy) + count(-dx, -dy) + 1
-            if (len >= 5) {
+            var wins = activeWinRule === "ExactFive"
+                       ? len === 5 : len >= 5
+            if (wins) {
                 var cells = [], startX = r, startY = c
                 while (startX - dx >= 0 && startX - dx < boardSize &&
                        startY - dy >= 0 && startY - dy < boardSize &&
@@ -1013,7 +1345,12 @@ Page {
         if (board[r][c] !== null) return
 
         // Save undo snapshot
-        undoStack.push({ board: cloneBoard(board), player: currentPlayer, lastR: lastMoveR, lastC: lastMoveC })
+        undoStack = undoStack.concat([{
+            board: cloneBoard(board),
+            player: currentPlayer,
+            lastR: lastMoveR,
+            lastC: lastMoveC
+        }])
         redoStack = []
 
         if (!timerStartedThisGame && settings && settings.gameMode === "Player vs AI") {
@@ -1025,6 +1362,7 @@ Page {
         // Place
         board[r][c] = currentPlayer
         board = board
+        playHapticFeedback()
         publishBoardToCover()
 
         // Win?
@@ -1034,20 +1372,21 @@ Page {
             return
         }
 
+        if (boardIsFull()) {
+            declareDraw()
+            return
+        }
+
         // Next turn
         currentPlayer = (currentPlayer === "X") ? "O" : "X"
 
         // If AI should play next, schedule it (not immediate, to keep UI responsive)
         if (settings && settings.gameMode === "Player vs AI" && currentPlayer === settings.aiSymbol) {
-            if (settings.aiDifficulty === "Unbeatable") {
-                startUnbeatableAI()
-            } else {
-                // Easy/Medium/Hard are synchronous via aiTimer -> selectAIMove()
-                aiTimer.start()
-            }
+            aiTimer.start()
         }
         lastMoveR = r
         lastMoveC = c
+        saveGameState()
     }
 
     function findImmediateWinMove(forSym) {
@@ -1056,13 +1395,14 @@ Page {
         var cand = generateCandidates(2, 120, forSym)
         if (!cand || cand.length === 0) return null
 
+        var wins = []
         for (var i = 0; i < cand.length; i++) {
             var m = cand[i]
             if (!m) continue
             var t = moveThreats(m.r, m.c, forSym)
-            if (t && t.win) return { r: m.r, c: m.c }
+            if (t && t.win) wins.push({ r: m.r, c: m.c })
         }
-        return null
+        return wins.length > 0 ? wins[randInt(wins.length)] : null
     }
 
     // -------------------------------
@@ -1203,7 +1543,8 @@ Page {
             var openEnds = fOpen + bOpen
 
             // Winning move
-            if (len >= 5) return 1e9
+            if (activeWinRule === "ExactFive"
+                    ? len === 5 : len >= 5) return 1e9
 
             // Threat weights (tuned for Gomoku-like play)
             if (len === 4) {
@@ -1227,6 +1568,7 @@ Page {
         var ai = settings.aiSymbol
         var pl = settings.playerSymbol
 
+        var previous = board[aiMoveR][aiMoveC]
         board[aiMoveR][aiMoveC] = ai
 
         var cand = generateCandidates(2, oppLimit || 14, pl)
@@ -1238,7 +1580,7 @@ Page {
             if (t && (t.win || t.openFour > 0 || t.openThree >= 2)) { forkExists = true; break }
         }
 
-        board[aiMoveR][aiMoveC] = null
+        board[aiMoveR][aiMoveC] = previous
         return forkExists
     }
 
@@ -1278,8 +1620,8 @@ Page {
         for (var r = 0; r < boardSize; r++)
             copy[r] = board[r].slice(0)
 
-        var wt = gameOver ? getWinnerName(currentPlayer) : ""
-        coverSnapshot(copy, boardSize, gameOver, wt, winningCells)
+        var wt = gameOver && !gameDraw ? getWinnerName(currentPlayer) : ""
+        coverSnapshot(copy, boardSize, gameOver, gameDraw, wt, winningCells)
     }
 
     // -------------------------------
@@ -1295,11 +1637,11 @@ Page {
 
         // --- EASY ---
         if (settings.aiDifficulty === "Easy") {
-            // 1) win now / block now (must)
+            // Easy always takes a win, but occasionally misses a forced block.
             var winNowM = findImmediateWinMove(ai)
             if (winNowM) return winNowM
             var blockNowM = findImmediateWinMove(pl)
-            if (blockNowM) return blockNowM
+            if (blockNowM && randomUnit() < 0.8) return blockNowM
 
             // 2) candidates
             var cand = candMed
@@ -1315,55 +1657,15 @@ Page {
             if (scored.length === 0) return firstEmptyFallback()
             scored.sort(function(a,b){ return b.s - a.s })
 
-            // 4) evaluate only top K deeply
-            var K = Math.min(12, scored.length)
-            var bestMove = scored[0].m
-            var bestVal = -1e18
-
-            for (var k = 0; k < K; k++) {
-                var m2 = scored[k].m
-                if (!m2) continue
-
-                board[m2.r][m2.c] = ai
-
-                // immediate win after placing
-                var tNow = moveThreats(m2.r, m2.c, ai)
-                var val
-                if (tNow && tNow.win) {
-                    val = 1e15
-                } else {
-                    // If this move allows an immediate opponent win next, heavily penalize it.
-                    // (Fast check: look for opponent immediate win in bounded candidate set.)
-                    var losing = false
-                    var oppCand = generateCandidates(2, 40, pl)
-                    for (var j = 0; j < oppCand.length; j++) {
-                        var o = oppCand[j]
-                        if (!o) continue
-                        var tOpp = moveThreats(o.r, o.c, pl)
-                        if (tOpp && tOpp.win) { losing = true; break }
-                    }
-
-                    if (losing) {
-                        val = -1e14
-                    } else {
-                        // opponent best reply (bounded)
-                        var oppBest = bestOpponentReplyScore(ai, pl, 14)
-                        val = scored[k].s - 0.95 * oppBest
-
-                        // fork penalty (bounded)
-                        if (opponentHasForkAfterBounded(m2.r, m2.c, 14))
-                            val -= 5e10
-                    }
+            if (blockNowM) {
+                var withoutForcedBlock = []
+                for (var e = 0; e < scored.length; e++) {
+                    if (scored[e].m.r !== blockNowM.r || scored[e].m.c !== blockNowM.c)
+                        withoutForcedBlock.push(scored[e])
                 }
-
-                board[m2.r][m2.c] = null
-
-                if (val > bestVal) {
-                    bestVal = val
-                    bestMove = m2
-                }
+                if (withoutForcedBlock.length > 0) scored = withoutForcedBlock
             }
-            return bestMove
+            return chooseVariedMove(scored, 8, 0.40, 12000)
         }
 
         // --- MEDIUM ---
@@ -1375,7 +1677,8 @@ Page {
             if (blockNow) return blockNow
 
             // Primary move: profit matrix (fast, strong positional play)
-            var m = profitBestMove(ai, pl, profitSelfMedium, profitOppMedium)
+            var m = profitBestMove(ai, pl, profitSelfMedium, profitOppMedium,
+                                   5, 0.05, 120)
             if (!m) return firstEmptyFallback()
 
             // Cheap blunder check: if this move allows an immediate opponent win, pick next best.
@@ -1394,7 +1697,8 @@ Page {
             if (!losing) return m
 
             // If it was a blunder, fall back to the HARD weights profit move (still fast)
-            var m2 = profitBestMove(ai, pl, profitSelfHard, profitOppHard)
+            var m2 = profitBestMove(ai, pl, profitSelfHard, profitOppHard,
+                                    2, 0.01, 20)
             return m2 ? m2 : firstEmptyFallback()
         }
 
@@ -1406,12 +1710,13 @@ Page {
             var blockNowH = findImmediateWinMove(pl)
             if (blockNowH) return blockNowH
 
-            // profit matrix
-            return profitBestMove(ai, pl, profitSelfHard, profitOppHard)
+            // Native C++ is the normal path; this is only the fallback move.
+            return profitBestMove(ai, pl, profitSelfHard, profitOppHard,
+                                  2, 0.01, 20)
         }
 
-        // --- UNBEATABLE ---
-        // real async Unbeatable is started from aiTimer
+        // --- EXPERT ---
+        // Native C++ is the normal path; retain a legal fallback.
 
         // fallback generic
         var fb = firstEmptyFallback()
@@ -1427,24 +1732,13 @@ Page {
             if (!settings || settings.gameMode !== "Player vs AI") return
             if (currentPlayer !== settings.aiSymbol) return
 
-            if (settings.aiDifficulty === "Unbeatable") {
-                startUnbeatableAI()
-                return
-            }
-
-            // EASY/MEDIUM/HARD: synchronous move selection
-            var move = selectAIMove()
-
-            if (!isValidMoveObj(move)) {
-                console.warn("[AI] selectAIMove returned invalid move:", move)
-                move = firstEmptyFallback()
-            }
-            if (!isValidMoveObj(move)) {
-                console.warn("[AI] No legal moves available")
-                return
-            }
-
-            applyMove(move.r, move.c)
+            hardThinkStartMs = Date.now()
+            aiThinking = true
+            activeAiRequest = ++aiRequestSerial
+            var seed = Math.floor(randomUnit() * 4294967295)
+            nativeAI.requestMove(board, boardSize, settings.aiSymbol,
+                                 settings.playerSymbol, settings.aiDifficulty,
+                                 activeWinRule, seed, activeAiRequest)
         }
     }
 
@@ -1457,13 +1751,11 @@ Page {
         anchors.bottom: parent.bottom
         width: parent.width
 
-        contentWidth: boardSize * dynamicCellSize
-        contentHeight: boardSize * dynamicCellSize
+        contentWidth: coordinateMargin + boardSize * dynamicCellSize
+        contentHeight: boardArea.y + boardArea.height + Theme.itemSizeLarge * 2
 
         PullDownMenu {
-            MenuItem { text: qsTr("New Game"); onClicked: restartGame() }
-            MenuItem { text: qsTr("Undo"); onClicked: undoMove() }
-            MenuItem { text: qsTr("Redo"); onClicked: redoMove() }
+            MenuItem { text: qsTr("New Game"); onClicked: requestNewGame() }
             MenuItem {
                 text: qsTr("Settings")
                 onClicked: {
@@ -1472,14 +1764,9 @@ Page {
                 }
             }
             MenuItem {
-                text: qsTr("Best Times")
-                onClicked: pageStack.push(Qt.resolvedUrl("BestTimesPage.qml"), { settings: settings })
-            }
-            MenuItem {
                 text: qsTr("About")
                 onClicked: pageStack.push(aboutPageComponent)
             }
-            MenuItem { text: qsTr("Quit"); onClicked: Qt.quit() }
         }
 
         // PAGE HEADER
@@ -1517,13 +1804,13 @@ Page {
                     spacing: (Theme.paddingSmall !== undefined ? Theme.paddingSmall : 6)
 
                     Text {
-                        text: "Mode:"
+                        text: qsTr("Mode:")
                         font.pixelSize: Theme.fontSizeMedium
                         color: "white"
                     }
 
                     Text {
-                        text: settings.gameMode
+                        text: settings ? gameModeLabel(settings.gameMode) : ""
                         font.pixelSize: Theme.fontSizeMedium
                         font.bold: true
                         color: "white"
@@ -1548,7 +1835,7 @@ Page {
                     spacing: (Theme.paddingSmall !== undefined ? Theme.paddingSmall : 6)
 
                     Text {
-                        text: "Turn:"
+                        text: qsTr("Turn:")
                         font.pixelSize: Theme.fontSizeMedium
                         color: "white"
                     }
@@ -1557,7 +1844,9 @@ Page {
                         id: turnValueText
                         text: {
                             if (settings.gameMode === "Player vs AI")
-                                return currentPlayer === settings.playerSymbol ? currentPlayerName() : "AI"
+                                return currentPlayer === settings.playerSymbol
+                                        ? currentPlayerName()
+                                        : (aiThinking ? qsTr("AI is thinking…") : qsTr("AI"))
                             else
                                 return currentPlayer === "X" ? settings.player1Name : settings.player2Name
                         }
@@ -1565,6 +1854,74 @@ Page {
                         font.pixelSize: Theme.fontSizeMedium
                         color: "white"
                     }
+
+                    Item { Layout.fillWidth: true }
+
+                    IconButton {
+                        Layout.preferredWidth: Theme.itemSizeSmall
+                        Layout.preferredHeight: Theme.itemSizeSmall
+                        icon.source: "image://theme/icon-m-back"
+                        enabled: !page.aiBusy && !gameOver && undoStack.length > 0
+                        opacity: enabled ? 1.0 : 0.35
+                        onClicked: undoMove()
+                    }
+
+                    IconButton {
+                        Layout.preferredWidth: Theme.itemSizeSmall
+                        Layout.preferredHeight: Theme.itemSizeSmall
+                        icon.source: "image://theme/icon-m-forward"
+                        enabled: !page.aiBusy && !gameOver && redoStack.length > 0
+                        opacity: enabled ? 1.0 : 0.35
+                        onClicked: redoMove()
+                    }
+                }
+            }
+        }
+
+        Item {
+            id: columnCoordinates
+            visible: settings && settings.showCoordinates
+            anchors.top: unifiedTopBar.bottom
+            anchors.topMargin: Theme.paddingMedium
+            x: coordinateMargin
+            width: boardSize * dynamicCellSize
+            height: coordinateMargin
+
+            Repeater {
+                model: boardSize
+                Label {
+                    x: index * dynamicCellSize
+                    width: dynamicCellSize
+                    anchors.verticalCenter: parent.verticalCenter
+                    horizontalAlignment: Text.AlignHCenter
+                    font.pixelSize: Math.min(Theme.fontSizeExtraSmall,
+                                             dynamicCellSize * 0.35)
+                    color: Theme.secondaryColor
+                    text: String.fromCharCode(65 + index)
+                }
+            }
+        }
+
+        Item {
+            id: rowCoordinates
+            visible: settings && settings.showCoordinates
+            anchors.top: boardArea.top
+            x: 0
+            width: coordinateMargin
+            height: boardSize * dynamicCellSize
+
+            Repeater {
+                model: boardSize
+                Label {
+                    y: index * dynamicCellSize
+                    width: coordinateMargin
+                    height: dynamicCellSize
+                    verticalAlignment: Text.AlignVCenter
+                    horizontalAlignment: Text.AlignHCenter
+                    font.pixelSize: Math.min(Theme.fontSizeExtraSmall,
+                                             dynamicCellSize * 0.35)
+                    color: Theme.secondaryColor
+                    text: index + 1
                 }
             }
         }
@@ -1574,10 +1931,12 @@ Page {
         // -------------------------------
         Item {
             id: boardArea
-            anchors.top: unifiedTopBar.bottom
+            anchors.top: columnCoordinates.visible ? columnCoordinates.bottom
+                                                   : unifiedTopBar.bottom
             anchors.topMargin: Theme.paddingMedium
-            width: flick.contentWidth
-            height: flick.contentHeight
+            x: coordinateMargin
+            width: boardSize * dynamicCellSize
+            height: boardSize * dynamicCellSize
 
             Repeater {
                 model: boardSize * boardSize
@@ -1648,14 +2007,15 @@ Page {
 
                     MouseArea {
                         anchors.fill: parent
-                        enabled: !aiThinking
+                        enabled: !page.aiBusy && (!settings ||
+                                 settings.gameMode !== "Player vs AI" ||
+                                 currentPlayer === settings.playerSymbol)
                         onClicked: {
                             if (gameOver) return
                             var r = Math.floor(index / boardSize)
                             var c = index % boardSize
-                            if (!board[r][c]) {
+                            if (!board[r][c])
                                 applyMove(r, c)
-                            }
                         }
                     }
                 }
@@ -1687,7 +2047,7 @@ Page {
                 }
 
                 Label {
-                    text: settings ? settings.aiDifficulty : ""
+                    text: settings ? difficultyLabel(settings.aiDifficulty) : ""
                     font.bold: true
                     font.pixelSize: Theme.fontSizeMedium
                     color: "white"
@@ -1709,9 +2069,10 @@ Page {
 
             property string winnerText: {
                 if (!gameOver) return ""
-                var winnerName = getWinnerName(currentPlayer)
-                return "<b><font color='gold'>Game Over!</font></b><br>" +
-                       "<font color='white'>Winner: </font>" +
+                if (gameDraw)
+                    return "<b><font color='gold'>" + qsTr("Draw") + "</font></b>"
+                return "<b><font color='gold'>" + qsTr("Game Over!") + "</font></b><br>" +
+                       "<font color='white'>" + qsTr("Winner: ") + "</font>" +
                        "<b><font color='gold'>" + currentPlayerName() + "</font></b>"
             }
 
@@ -1728,6 +2089,12 @@ Page {
     // -------------------------------
     function undoMove() {
         if (!settings) return
+        activeAiRequest = ++aiRequestSerial
+        aiTimer.stop()
+        hardThinkTimer.stop()
+        hardApplyDelayTimer.stop()
+        pendingAiMove = null
+        aiThinking = false
 
         if (settings.gameMode === "Player vs AI") {
             // Undo up to two plies, but only if possible.
@@ -1743,6 +2110,12 @@ Page {
 
     function redoMove() {
         if (!settings) return
+        activeAiRequest = ++aiRequestSerial
+        aiTimer.stop()
+        hardThinkTimer.stop()
+        hardApplyDelayTimer.stop()
+        pendingAiMove = null
+        aiThinking = false
 
         if (settings.gameMode === "Player vs AI") {
             var ok1 = redoOnce()
@@ -1756,13 +2129,14 @@ Page {
     function undoOnce() {
         if (undoStack.length === 0) return false
 
-        var last = undoStack.pop()
-        redoStack.push({
+        var last = undoStack[undoStack.length - 1]
+        undoStack = undoStack.slice(0, undoStack.length - 1)
+        redoStack = redoStack.concat([{
             board: cloneBoard(board),
             player: currentPlayer,
             lastR: lastMoveR,
             lastC: lastMoveC
-        })
+        }])
 
         board = last.board.map(function(r) {
             var a = []
@@ -1774,20 +2148,23 @@ Page {
         lastMoveC = (last.lastC !== undefined) ? last.lastC : -1
         winningCells = []
         gameOver = false
+        gameDraw = false
         publishBoardToCover()
+        saveGameState()
         return true
     }
 
     function redoOnce() {
         if (redoStack.length === 0) return false
 
-        var next = redoStack.pop()
-        undoStack.push({
+        var next = redoStack[redoStack.length - 1]
+        redoStack = redoStack.slice(0, redoStack.length - 1)
+        undoStack = undoStack.concat([{
             board: cloneBoard(board),
             player: currentPlayer,
             lastR: lastMoveR,
             lastC: lastMoveC
-        })
+        }])
 
         board = next.board.map(function(r) {
             var a = []
@@ -1799,17 +2176,50 @@ Page {
         lastMoveC = (next.lastC !== undefined) ? next.lastC : -1
         winningCells = []
         gameOver = false
+        gameDraw = false
         publishBoardToCover()
+        saveGameState()
         return true
     }
 
     // Make sure we pick up startingPlayer once settings is actually set
     Component.onCompleted: {
+        reseedAI()
+        // Reading supported once initializes the QtFeedback backend before
+        // the first move, matching Sailfish Silica's own feedback handling.
+        try {
+            if (!placementHaptic.supported)
+                console.warn("Haptic feedback is unavailable on this device")
+        } catch (error) {
+            console.warn("Could not initialize haptic feedback:", error)
+        }
+        var restored = false
         if (settings) {
-            currentPlayer = settings.startingPlayer
+            if (settings.aiDifficulty === "Unbeatable")
+                settings.aiDifficulty = "Expert"
+            settings.boardSize = normalizeBoardSize(settings.boardSize)
+            settings.winRule = normalizeWinRule(settings.winRule)
+            if (settings.boardZoomPercent !== 100 &&
+                    settings.boardZoomPercent !== 125 &&
+                    settings.boardZoomPercent !== 150)
+                settings.boardZoomPercent = 100
+            restored = restoreSavedGame()
+            if (!restored) {
+                boardSize = settings.boardSize
+                activeWinRule = settings.winRule
+                board = createEmptyBoard(boardSize)
+                currentPlayer = settings.startingPlayer
+            }
         } else {
             currentPlayer = "X"
-       }
-       publishBoardToCover()
+        }
+        initializationComplete = true
+        publishBoardToCover()
+        if (settings && settings.gameMode === "Player vs AI" &&
+                currentPlayer === settings.aiSymbol) {
+            aiTimer.start()
+        }
     }
+
+    Component.onDestruction: saveGameState()
 }

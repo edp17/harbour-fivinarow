@@ -56,22 +56,38 @@ Page {
         return mm + ":" + ss
     }
 
+    function forCurrentBoard(entries) {
+        if (!settings) return []
+        return entries.filter(function(entry) {
+            var size = entry.boardSize || 15
+            var rule = entry.winRule || "Freestyle"
+            return size === settings.boardSize && rule === settings.winRule
+        })
+    }
+
     function timesEasy() {
-        var out = settings ? parseList(settings.bestTimesEasyJson) : []
+        var out = settings ? forCurrentBoard(parseList(settings.bestTimesEasyJson)) : []
         out.sort(function(a, b) { return msOf(a) - msOf(b) })
         if (out.length > 6) out = out.slice(0, 6)
         return out
     }
 
     function timesMedium() {
-        var out = settings ? parseList(settings.bestTimesMediumJson) : []
+        var out = settings ? forCurrentBoard(parseList(settings.bestTimesMediumJson)) : []
         out.sort(function(a, b) { return msOf(a) - msOf(b) })
         if (out.length > 6) out = out.slice(0, 6)
         return out
     }
 
     function timesHard() {
-        var out = settings ? parseList(settings.bestTimesHardJson) : []
+        var out = settings ? forCurrentBoard(parseList(settings.bestTimesHardJson)) : []
+        out.sort(function(a, b) { return msOf(a) - msOf(b) })
+        if (out.length > 6) out = out.slice(0, 6)
+        return out
+    }
+
+    function timesExpert() {
+        var out = settings ? forCurrentBoard(parseList(settings.bestTimesUnbeatableJson)) : []
         out.sort(function(a, b) { return msOf(a) - msOf(b) })
         if (out.length > 6) out = out.slice(0, 6)
         return out
@@ -80,7 +96,8 @@ Page {
     readonly property var easyList: timesEasy()
     readonly property var mediumList: timesMedium()
     readonly property var hardList: timesHard()
-    readonly property bool hasAny: (easyList.length + mediumList.length + hardList.length) > 0
+    readonly property var expertList: timesExpert()
+    readonly property bool hasAny: (easyList.length + mediumList.length + hardList.length + expertList.length) > 0
 
     SilicaFlickable {
         anchors.fill: parent
@@ -90,7 +107,8 @@ Page {
             visible: settings !== null &&
                      (parseList(settings.bestTimesEasyJson).length > 0 ||
                       parseList(settings.bestTimesMediumJson).length > 0 ||
-                      parseList(settings.bestTimesHardJson).length > 0)
+                      parseList(settings.bestTimesHardJson).length > 0 ||
+                      parseList(settings.bestTimesUnbeatableJson).length > 0)
 
             MenuItem {
                 text: qsTr("Clear best times")
@@ -99,6 +117,7 @@ Page {
                         settings.bestTimesEasyJson = "[]"
                         settings.bestTimesMediumJson = "[]"
                         settings.bestTimesHardJson = "[]"
+                        settings.bestTimesUnbeatableJson = "[]"
                     })
                 }
             }
@@ -110,6 +129,15 @@ Page {
             spacing: Theme.paddingMedium
 
             PageHeader { title: qsTr("Best times") }
+
+            Label {
+                x: Theme.horizontalPageMargin
+                width: parent.width - 2 * Theme.horizontalPageMargin
+                color: Theme.highlightColor
+                text: qsTr("%1 × %1 · %2").arg(settings ? settings.boardSize : 15)
+                      .arg(settings && settings.winRule === "ExactFive"
+                           ? qsTr("Exactly five") : qsTr("Five or more"))
+            }
 
             Label {
                 x: Theme.horizontalPageMargin
@@ -202,6 +230,35 @@ Page {
 
                 Repeater {
                     model: hardList
+                    delegate: Label {
+                        x: Theme.horizontalPageMargin
+                        width: parent.width - 2 * Theme.horizontalPageMargin
+                        truncationMode: TruncationMode.Fade
+                        text: "#" + (index + 1) + ". " + whoOf(modelData) + "  " + fmtMs(msOf(modelData))
+                    }
+                }
+
+                Item { width: 1; height: Theme.paddingMedium }
+            }
+
+            // EXPERT
+            Column {
+                width: parent.width
+                visible: expertList.length > 0
+                spacing: Theme.paddingSmall
+
+                Item {
+                    width: parent.width
+                    height: Theme.itemSizeSmall
+
+                    SectionHeader {
+                        anchors.fill: parent
+                        text: qsTr("Expert")
+                    }
+                }
+
+                Repeater {
+                    model: expertList
                     delegate: Label {
                         x: Theme.horizontalPageMargin
                         width: parent.width - 2 * Theme.horizontalPageMargin

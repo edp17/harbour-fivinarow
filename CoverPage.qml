@@ -26,6 +26,7 @@ CoverBackground {
     property int boardSize: 15
     property var winningCells: []
     property bool gameOver: false
+    property bool gameDraw: false
     property string winnerText: ""
 
     /* ---------------------------
@@ -137,7 +138,7 @@ CoverBackground {
             }
 
             Label {
-                text: "Winner: " + winnerText
+                text: gameDraw ? qsTr("Draw") : qsTr("Winner: %1").arg(winnerText)
                 font.pixelSize: Theme.fontSizeSmall
                 font.bold: true
                 color: "black"

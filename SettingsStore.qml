@@ -30,9 +30,9 @@ ConfigurationGroup {
     property string playerSymbol: "X"
     property string aiSymbol: "O"
     property string startingPlayer: "X"
-    property string player1Name: "Player 1"
-    property string player2Name: "Player 2"
-    property string settingsVersion: "1.0"
+    property string player1Name: qsTr("Player 1")
+    property string player2Name: qsTr("Player 2")
+    property string settingsVersion: "1.3"
 
     // UI state for SettingsPage expand/collapse
     property bool gameModeExpanded: true
@@ -40,11 +40,25 @@ ConfigurationGroup {
     property bool symbolExpanded: false
     property bool startExpanded: false
     property bool namesExpanded: false
+    property bool boardExpanded: false
+    property bool accessibilityExpanded: false
     property string bestTimesEasyJson: "[]"
     property string bestTimesMediumJson: "[]"
     property string bestTimesHardJson: "[]"
+    property string bestTimesUnbeatableJson: "[]"
 
-    // Forward-compatible knobs (safe defaults)
-    property int boardSize: 15           // future: 9/13/15
+    // Board, rules and accessibility
+    property int boardSize: 15
+    property string winRule: "Freestyle"
+    property bool showCoordinates: false
+    property int boardZoomPercent: 100
+    property bool hapticFeedback: true
+
+    // Persistent session and aggregate results. The Expert table retains its
+    // old key so upgrades do not discard RC1/RC2 scores.
+    property string savedGameJson: ""
+    property string statisticsJson: "{}"
+
+    // Timing/UI behaviour
     property int aiThinkDelayMs: 300     // controls aiTimer.interval
 }

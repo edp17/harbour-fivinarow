@@ -1,6 +1,8 @@
 [Desktop Entry]
 Name=Five in a Row
+Name[hu]=Amőba
 Comment=Gomoku (Five in a Row)
+Comment[hu]=Gomoku (amőba)
 Exec=/usr/bin/harbour-fivinarow
 Icon=harbour-fivinarow
 Type=Application
@@ -8,4 +10,6 @@ Categories=Game;
 X-Sailfish-ApplicationType=Silica
 
 [X-Sailjail]
-Sandboxing=Disabled
+Permissions=
+OrganizationName=edp17
+ApplicationName=harbour-fivinarow
